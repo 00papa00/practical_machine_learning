@@ -1,0 +1,203 @@
+---
+title: "Week4-Project_Final"
+author: "Serge Toulzac"
+date: "6 juin 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+## Library loading
+```{r message=FALSE}
+library(caret)
+library(rpart)
+library(dplyr)
+library (ggplot2)
+library(ISLR)
+library(snow)
+library(parallel)
+library(doParallel)
+library(rpart.plot)
+```
+## Data loading
+```{r}
+trainURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+rawData <- read.csv(url(trainURL), na.strings=c("NA","#DIV/0!", ""))
+test <- read.csv(url(testURL))
+```
+
+## Seed
+```{r seed}
+set.seed(111)
+```
+## Explonatory Analysis
+#### Removing columns that will not be used:
+<ul>
+<li>X</li><li>user_name</li><li>raw_timestamp_part_1</li><li>raw_timestamp_part_2</li><li>cvtd_timestamp</li><li>new_window</li></ul>
+
+```{r delCol}
+rawData <- subset(rawData, select=-c(X,user_name,raw_timestamp_part_1,raw_timestamp_part_2,cvtd_timestamp,new_window))
+```
+
+#### Removing data with large number of NA values (keep columns who have more than 80% of real values)
+
+```{r del_na}
+rawData <- rawData [, colSums(!is.na(rawData))>(nrow(rawData)* .8)]
+```
+
+#### remove highly corelated predictor (> 0.7)
+```{r highCorr}
+corMatrix <- cor(rawData[,-54])
+highCor <- findCorrelation(corMatrix,cutoff = .7)
+cleanData <- rawData[,-highCor]
+rm(corMatrix)
+rm(rawData)
+```
+
+#### Cross-validation
+
+I will separate the training set in two data set (train (70%) and validation (30%))
+I will then be able to have information on how does my models and have an accuracy not calculated on the training data set.
+Accuracy on validation set will be less than train set accuracy.
+
+
+```{r cross_val}
+partition <- createDataPartition(y=cleanData$classe, p=0.7, list=FALSE)
+train <- cleanData[partition,]
+validation <- cleanData[-partition,]
+rm(partition)
+```
+
+
+## Pre-processing
+
+#### Removing Data with Near Zero Variance
+```{r nzv }
+nsv <- nearZeroVar(cleanData, saveMetrics = TRUE)
+cleanData <- cleanData[, !nsv$nzv]
+rm(nsv)
+```
+
+
+##Modeling
+All modles will preProcess the data:
+<ul>
+<li>Center</li>
+<li>scale</li>
+<li>BoxCox</li>
+</ul>
+
+
+#### Parameter tuning
+```{r tuning}
+tr_cont2 <- trainControl(method = "cv",number = 5,  allowParallel = TRUE, classProbs = TRUE, summaryFunction=mnLogLoss)
+```
+
+LogLoss will be used for monitoring the performance of the training and select the "final" model of each models.
+
+logLoss is best choice for "multiclass" classifcation probleme (while ROC  is best for binary classification)
+
+
+### Decision Tree
+```{r dt}
+control <- trainControl(method="repeatedcv", number=3, repeats = 5, classProbs=TRUE, summaryFunction=mnLogLoss)
+model_dt <- train(classe ~ ., data = train, preProcess=c("center", "scale", "BoxCox"), trControl=tr_cont2, method="rpart", metric="logLoss")
+model_dt
+
+pred_dt <- predict(model_dt, newdata=validation)
+confusionMatrix(pred_dt,validation$classe)
+```
+
+
+### Random Forest
+```{r rf}
+cluster <- makeCluster(detectCores() -1 ) 
+registerDoParallel(cluster)
+
+model_rf <- train(classe ~ ., data = train, preProcess=c("center", "scale","BoxCox"), method = "rf", metric="logLoss", trControl = tr_cont2, verbose = FALSE)
+
+stopCluster(cluster)
+registerDoSEQ()
+
+model_rf
+
+pred_rf <- predict(model_rf, newdata= validation)
+confusionMatrix(pred_rf, validation$classe)
+
+```
+
+### Gradient Boosting Machine
+
+```{r gbm}
+cluster <- makeCluster(detectCores()-1) 
+registerDoParallel(cluster)
+
+model_gbm <- trainControl(method="cv",number=5, allowParallel=TRUE)
+timer_start <- Sys.time()
+model_gbm <- train(classe ~ ., data = train, preProcess=c("center", "scale","BoxCox"), method = "gbm", metric="logLoss",  trControl = tr_cont2, verbose =FALSE)
+
+stopCluster(cluster)
+registerDoSEQ()
+
+model_gbm
+
+pred_gbm <- predict(model_gbm, newdata = validation)
+confusionMatrix(pred_gbm,validation$classe)
+
+
+```
+
+### SVM Radial
+
+```{r svm}
+cluster <- makeCluster(detectCores()-1) 
+registerDoParallel(cluster)
+
+model_svm <- trainControl(method="cv",number=5, allowParallel=TRUE)
+
+model_svm <- train(classe ~ ., data = train, preProcess=c("center", "scale","BoxCox"), method = "svmRadial",  tuneLength=5, metric="logLoss",  trControl = tr_cont2, verbose =FALSE)
+
+stopCluster(cluster)
+registerDoSEQ()
+
+model_svm
+
+pred_svm <- predict(model_svm, newdata = validation)
+confusionMatrix(pred_svm,validation$classe)
+
+
+```
+
+
+
+## Models Comparision
+
+```{r}
+# Compare model performances using resample()
+models_compare <- resamples(list(DT=model_dt, RF=model_rf,GBM=model_gbm,SVM=model_svm))
+
+# Summary of the models performances
+summary(models_compare)
+
+scales <- list(x=list(relation="free"), y=list(relation="free"))
+bwplot(models_compare, scales=scales)
+```
+
+Random Forest have the lowest logLoss value and therfore is better that Decision tree, Support Vector Machine and Gradient Boosting Machine
+
+Random Forest have the best Accuracy on the validation data set: 99,46% with  99,23% < 95% CI < 99,63% 
+
+##s Prediction on Test data with Random Forest
+
+```{r predit}
+predicted <- predict(model_rf, test)
+predicted
+
+```
+
